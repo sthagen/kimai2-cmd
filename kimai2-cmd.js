@@ -28,6 +28,9 @@ const moment = require('moment');
 
 //reading version number from package.json
 var pjson = require('./package.json');
+const {
+    config
+} = require('process');
 
 /* -------------------------------------------------------------------------- */
 /*                                  Functions                                 */
@@ -50,7 +53,8 @@ function callKimaiApi(httpMethod, kimaiMethod, serversettings, options = false) 
     const qs = options.qs || false
     const reqbody = options.reqbody || false
 
-    debug("calling kimai:", httpMethod, kimaiMethod, serversettings)
+    debug("---")
+    debug("calling kimai: " + " " + httpMethod + " " + kimaiMethod + " " + serversettings)
 
     return new Promise((resolve, reject) => {
         const options = {
@@ -70,7 +74,7 @@ function callKimaiApi(httpMethod, kimaiMethod, serversettings, options = false) 
             options.headers['Content-Type'] = 'application/json'
         }
 
-        debug("request options:", options)
+        debug("request options: " + options)
 
         request(options, (error, response, body) => {
             if (error) {
@@ -79,7 +83,7 @@ function callKimaiApi(httpMethod, kimaiMethod, serversettings, options = false) 
 
             let jsonarr = JSON.parse(response.body)
 
-            debug("Response body:", jsonarr)
+            debug("Response body: " + jsonarr)
 
             if (jsonarr.message) {
                 console.log('Server error message:')
@@ -169,6 +173,7 @@ function uiMainMenu(settings) {
                         .then(_ => uiMainMenu(settings))
                     break;
                 case 'stop':
+                    const selected = {}
                     kimaiList(settings, 'timesheets/active', false)
                         .then(res => {
                             if (res[1].length > 0) {
@@ -176,7 +181,19 @@ function uiMainMenu(settings) {
                             }
                         })
                         .then(stopId => {
-                            return kimaiStop(settings, stopId)
+                            selected.id = stopId;
+
+                            // Only ask for the description if a specific measurement has been selected
+                            return selected.id ? uiEnterDescription() : undefined
+                        })
+                        .then(res => {
+                            // only set the description if one has been prompted and entered
+                            if (res && res.enterDescription) {
+                                return kimaiSetDescription(settings, selected.id, res.enterDescription)
+                            }
+                        })
+                        .then(res => {
+                            return kimaiStop(settings, selected.id)
                         })
                         .then(res => uiMainMenu(res[0]))
                     break;
@@ -217,6 +234,26 @@ function kimaiRestart(settings, id) {
                 resolve([settings, res])
             })
     })
+}
+
+/**
+ * Returns the date according to settings
+ * 
+ * @param {object} settings All settings read from ini
+ * @returns {string} The date according to settings
+ */
+function kimaiServerTime(settings) {
+    if (settings.serversettings.servertime) {
+        callKimaiApi('GET', 'config/i18n', settings.serversettings)
+            .then(res => {
+                debug("servertime: " + res.now)
+                debug("localtime: " + moment().format())
+                return res.now
+            })
+    } else {
+        debug("localtime: " + moment().format())
+        return moment().format()
+    }
 }
 
 /**
@@ -263,12 +300,14 @@ function kimaiStart(settings, project, activity) {
     return new Promise((resolve, reject) => {
 
         let body = {
-            begin: moment().format(),
             project: project,
             activity: activity
         }
 
-        debug("kimaistart calling api:", body)
+        // select client or server time according to settings
+        body.begin = kimaiServerTime(settings)
+
+        debug("kimaistart calling api: " + body)
 
         callKimaiApi('POST', 'timesheets', settings.serversettings, {
                 reqbody: body
@@ -278,7 +317,6 @@ function kimaiStart(settings, project, activity) {
                 resolve()
             })
     })
-
 }
 
 /**
@@ -530,6 +568,21 @@ function uiSelectMeasurement(thelist) {
 }
 
 /**
+ * Interactive UI: Prompt the user to enter a description for a measurement.
+ */
+function uiEnterDescription() {
+    return new Promise((resolve, reject) => {
+        inquirer
+            .prompt({
+                type: 'input',
+                name: 'enterDescription',
+                message: 'Description: '
+            }).then(answer => {
+                resolve(answer);
+            });
+    });
+}
+/**
  * Returns a prompt with autocomplete
  * 
  * @param {array} thelist The list of elements to select from
@@ -620,9 +673,6 @@ function iniPath() {
 function checkSettings() {
     return new Promise((resolve, reject) => {
 
-        
-        
-
         const settingsPath = iniPath()
         if (settingsPath) {
             debug("settings.ini found at: " + settingsPath)
@@ -676,6 +726,9 @@ function uiAskForSettings() {
                 let settings = {}
                 settings.serversettings = answers
 
+                //defaults servertime to false
+                settings.serversettings.servertime = false
+
                 //argos/bitbar settings
                 settings.argos_bitbar = {}
 
@@ -706,6 +759,30 @@ function uiAskForSettings() {
     })
 }
 
+/**
+ * Sets the 'description' field of a measurement. Works on both running and stopped measurements.
+ * @param {object} settings all settings read from the settings file
+ * @param {string} id measurement id
+ * @param {*} description the description that shall be applied to the measurement
+ */
+function kimaiSetDescription(settings, id, description) {
+    return new Promise((resolve, reject) => {
+
+        let body = {
+            description: description
+        }
+
+        debug("kimaiSetDescription calling api: " + body)
+
+        callKimaiApi('PATCH', 'timesheets/' + id, settings.serversettings, {
+                reqbody: body
+            })
+            .then(res => {
+                console.log('Set description for: ' + res.id)
+                resolve()
+            })
+    })
+}
 
 /**
  * Returns the ini save path based on os and installation type, creates folder if necessary
@@ -883,11 +960,12 @@ program.command('restart [id]')
             })
     })
 
-program.command('stop [id]')
-    .description('stop all or selected measurement measurements, [id] is optional')
-    .action(function (measurementId) {
+program.command('stop [id] [description]')
+    .description('stop all or selected measurement measurements, [id] is optional, [description] is optional but needs [id]')
+    .action(function (measurementId, description) {
         checkSettings()
             .then(settings => {
+                kimaiSetDescription(settings, measurementId, description)
                 kimaiStop(settings, measurementId)
             })
     })
